@@ -1,9 +1,11 @@
+#ifdef USE_ESP32
+
 #include "powerpal_ble.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
-#include "esp_wifi.h"
+#include "esphome/core/time.h"
 
-#ifdef USE_ESP32
+
 namespace esphome {
 namespace powerpal_ble {
 
@@ -15,14 +17,44 @@ void Powerpal::dump_config() {
   LOG_SENSOR(" ", "Power", this->power_sensor_);
   LOG_SENSOR(" ", "Daily Energy", this->daily_energy_sensor_);
   LOG_SENSOR(" ", "Total Energy", this->energy_sensor_);
-  }
+  LOG_SENSOR(" ", "Pulses", this->pulses_sensor_);
+    LOG_SENSOR(" ", "Daily Pulses", this->daily_pulses_sensor_);
+    LOG_SENSOR(" ", "Watt Hours", this->watt_hours_sensor_);
+  LOG_SENSOR(" ", "Timestamp", this->timestamp_sensor_);
+  LOG_SENSOR(" ", "Cost", this->cost_sensor_);
+}
 
 void Powerpal::setup() {
   this->authenticated_ = false;
   this->pulse_multiplier_ = ((seconds_in_minute * this->reading_batch_size_[0]) / (this->pulses_per_kwh_ / kw_to_w_conversion));
-  ESP_LOGI(TAG, "pulse_multiplier_: %f", this->pulse_multiplier_ );
+  ESP_LOGD(TAG, "pulse_multiplier_: %f", this->pulse_multiplier_ );
+
+#ifdef USE_HTTP_REQUEST
+    this->stored_measurements_.resize(15); //TODO dynamic
+    this->cloud_uploader_->set_method("POST");
+#endif
 }
 
+// void Powerpal::loop() {
+//   // for (uint16_t i = 0; i < 15; i++) {
+//   //   uint32_t timestamp = 1632487923494;
+//   //   this->store_measurement_(i, timestamp+i);
+//   // }
+//   // this->upload_data_to_cloud_();
+
+//   if (this->stored_measurements_.size()) {
+//     uint32_t timestamp = 1632487923494;
+//     this->store_measurement_(
+//         this->stored_measurements_count_,
+//         timestamp + this->stored_measurements_count_,
+//         (uint32_t)roundf(this->stored_measurements_count_ * (this->pulses_per_kwh_ / kw_to_w_conversion)),
+//         (this->stored_measurements_count_ / this->pulses_per_kwh_) * this->energy_cost_
+//       );
+//     if (this->stored_measurements_count_ == 14) {
+//       this->upload_data_to_cloud_();
+//     }
+//   }
+// }
 
 std::string Powerpal::pkt_to_hex_(const uint8_t *data, uint16_t len) {
   char buf[64];
@@ -32,7 +64,6 @@ std::string Powerpal::pkt_to_hex_(const uint8_t *data, uint16_t len) {
   std::string ret = buf;
   return ret;
 }
-
 
 void Powerpal::decode_(const uint8_t *data, uint16_t length) {
   ESP_LOGD(TAG, "DEC(%d): 0x%s", length, this->pkt_to_hex_(data, length).c_str());
@@ -52,40 +83,34 @@ void Powerpal::parse_measurement_(const uint8_t *data, uint16_t length) {
     unix_time += (data[1] << 8);
     unix_time += (data[2] << 16);
     unix_time += (data[3] << 24);
-    long int new_time = unix_time;
-    //
-        uint16_t pulses_within_interval = data[4];
+
+    uint16_t pulses_within_interval = data[4];
     pulses_within_interval += data[5] << 8;
-    
+
     // float total_kwh_within_interval = pulses_within_interval / this->pulses_per_kwh_;
     float avg_watts_within_interval = pulses_within_interval * this->pulse_multiplier_;
-    
-    ESP_LOGI(TAG, "Timestamp: %lld, Pulses: %d, Average Watts within interval: %f W, Daily Pulses: %llu", 
-             unix_time, 
-             pulses_within_interval,
-             avg_watts_within_interval, 
-             daily_pulses_);
-    
+
+    ESP_LOGI(TAG, "Timestamp: %lld, Pulses: %d, Average Watts within interval: %f W", unix_time, pulses_within_interval,
+             avg_watts_within_interval);
+
     if (this->power_sensor_ != nullptr) {
       this->power_sensor_->publish_state(avg_watts_within_interval);
-
-    if (this->cost_sensor_ != nullptr) {
-      double mycost = (pulses_within_interval / this->pulses_per_kwh_) * this->energy_cost_;
-      this->cost_sensor_->publish_state(mycost);
     }
+
 
     if (this->pulses_sensor_ != nullptr) {
-       this->pulses_sensor_->publish_state(pulses_within_interval);
+     this->pulses_sensor_->publish_state(pulses_within_interval);
     }
 
-    if (this->watt_hours_sensor_ != nullptr) {
-      int mywatt_hrs = (uint32_t)roundf(pulses_within_interval * (this->pulses_per_kwh_ / kw_to_w_conversion));
-       this->watt_hours_sensor_->publish_state(mywatt_hrs);
+
+
+      if (this->watt_hours_sensor_ != nullptr) {
+      float energy = this->total_pulses_ / this->pulses_per_kwh_;
+        this->watt_hours_sensor_->publish_state(energy*1000);
     }
-     if (this->timestamp_sensor_ != nullptr) {
-      //int mywatt_hrs = (uint32_t)roundf(pulses_within_interval * (this->pulses_per_kwh_ / kw_to_w_conversion));
-       this->timestamp_sensor_->publish_state(new_time);
-    }
+
+
+
     if (this->energy_sensor_ != nullptr) {
       this->total_pulses_ += pulses_within_interval;
       float energy = this->total_pulses_ / this->pulses_per_kwh_;
@@ -95,17 +120,17 @@ void Powerpal::parse_measurement_(const uint8_t *data, uint16_t length) {
     if (this->daily_energy_sensor_ != nullptr) {
       // even if new day, publish last measurement window before resetting
       this->daily_pulses_ += pulses_within_interval;
+           if (this->daily_pulses_sensor_ != nullptr) {
+           this->daily_pulses_sensor_->publish_state(this->daily_pulses_);
+        }
       float energy = this->daily_pulses_ / this->pulses_per_kwh_;
       this->daily_energy_sensor_->publish_state(energy);
-      
-      if (this->daily_pulses_sensor_ != nullptr) {
-      this->daily_pulses_sensor_->publish_state(daily_pulses_);
-      }
+
       // if esphome device has a valid time component set up, use that (preferred)
       // else, use the powerpal measurement timestamps
 #ifdef USE_TIME
       auto *time_ = *this->time_;
-      esphome::ESPTime date_of_measurement = time_->now();
+      ESPTime date_of_measurement = time_->now();
       if (date_of_measurement.is_valid()) {
         if (this->day_of_last_measurement_ == 0) { this->day_of_last_measurement_ = date_of_measurement.day_of_year;}
         else if (this->day_of_last_measurement_ != date_of_measurement.day_of_year) {
@@ -130,6 +155,24 @@ void Powerpal::parse_measurement_(const uint8_t *data, uint16_t length) {
     }
 
 
+      if (this->timestamp_sensor_ != nullptr) {
+          this->timestamp_sensor_->publish_state((float)unix_time);
+    }
+
+
+#ifdef USE_HTTP_REQUEST
+    if(this->cloud_uploader_ != nullptr) {
+      this->store_measurement_(
+        pulses_within_interval,
+        unix_time,
+        (uint32_t)roundf(pulses_within_interval * (this->pulses_per_kwh_ / kw_to_w_conversion)),
+        (pulses_within_interval / this->pulses_per_kwh_) * this->energy_cost_
+      );
+      if (this->stored_measurements_count_ == 14) {
+        this->upload_data_to_cloud_();
+      }
+    }
+#endif
   }
 }
 
@@ -156,6 +199,39 @@ std::string Powerpal::serial_to_apikey_(const uint8_t *data, uint16_t length) {
   return api_key;
 }
 
+#ifdef USE_HTTP_REQUEST
+void Powerpal::store_measurement_(uint16_t pulses, time_t timestamp, uint32_t watt_hours, float cost) {
+  this->stored_measurements_count_++;
+  this->stored_measurements_[this->stored_measurements_count_].pulses = pulses;
+  this->stored_measurements_[this->stored_measurements_count_].timestamp = timestamp;
+  this->stored_measurements_[this->stored_measurements_count_].watt_hours = watt_hours;
+  this->stored_measurements_[this->stored_measurements_count_].cost = cost;
+}
+
+void Powerpal::upload_data_to_cloud_() {
+  this->stored_measurements_count_ = 0;
+  if (this->powerpal_device_id_.length() && this->powerpal_apikey_.length()) {
+    StaticJsonDocument<2048> doc; // 768 bytes, each entry may take up 15 bytes (uint16_t + uint32_t + uint32_t + float + bool)
+    JsonArray array = doc.to<JsonArray>();
+    for (int i = 0; i < 15; i++) {
+      JsonObject nested = array.createNestedObject();
+      nested["timestamp"] = this->stored_measurements_[i].timestamp;
+      nested["pulses"] = this->stored_measurements_[i].pulses;
+      nested["watt_hours"] = this->stored_measurements_[i].watt_hours;
+      nested["cost"] = this->stored_measurements_[i].cost;
+      nested["is_peak"] = false;
+    }
+    std::string body;
+    serializeJson(doc, body);
+    this->cloud_uploader_->set_body(body);
+    // empty triggers, but requirement of using the send function
+    std::vector<http_request::HttpRequestResponseTrigger *> response_triggers_;
+    this->cloud_uploader_->send(response_triggers_);
+  } else {
+    // apikey or device missing
+  }
+}
+#endif
 
 void Powerpal::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
                                    esp_ble_gattc_cb_param_t *param) {
@@ -165,53 +241,6 @@ void Powerpal::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gat
       break;
     }
     case ESP_GATTC_SEARCH_CMPL_EVT: {
-      // auto *pairing_code_char_ = this->parent_->get_characteristic(POWERPAL_SERVICE_UUID,
-      // POWERPAL_CHARACTERISTIC_PAIRING_CODE_UUID); if (pairing_code_char_ == nullptr) {
-      //   ESP_LOGE(TAG, "[%s] No Powerpal service or Pairing Code Characteristic found at device, not a POWERPAL..?",
-      //             this->parent_->address_str().c_str());
-      //   break;
-      // } else {
-      //   this->pairing_code_char_handle_ = pairing_code_char_->handle;
-      // }
-
-      // auto *reading_batch_size_char_ = this->parent_->get_characteristic(POWERPAL_SERVICE_UUID,
-      // POWERPAL_CHARACTERISTIC_READING_BATCH_SIZE_UUID); if (reading_batch_size_char_ == nullptr) {
-      //   ESP_LOGE(TAG, "[%s] No Powerpal service or Reading Batch Size Characteristic found at device, not a
-      //   POWERPAL..?",
-      //             this->parent_->address_str().c_str());
-      //   break;
-      // } else {
-      //   this->reading_batch_size_char_handle_ = reading_batch_size_char_->handle;
-      // }
-
-      // auto *measurement_char_ = this->parent_->get_characteristic(POWERPAL_SERVICE_UUID,
-      // POWERPAL_CHARACTERISTIC_MEASUREMENT_UUID); if (measurement_char_ == nullptr) {
-      //   ESP_LOGE(TAG, "[%s] No Powerpal service or Measurement Characteristic found at device, not a POWERPAL..?",
-      //             this->parent_->address_str().c_str());
-      //   break;
-      // } else {
-      //   this->measurement_char_handle_ = measurement_char_->handle;
-      // }
-
-      // auto *uuid_char_ = this->parent_->get_characteristic(POWERPAL_SERVICE_UUID,
-      // POWERPAL_CHARACTERISTIC_UUID_UUID); if (uuid_char_ == nullptr) {
-      //   ESP_LOGE(TAG, "[%s] No Powerpal service or Measurement Characteristic found at device, not a POWERPAL..?",
-      //             this->parent_->address_str().c_str());
-      //   break;
-      // } else {
-      //   this->uuid_char_handle_ = uuid_char_->handle;
-      //   ESP_LOGE(TAG, "UUID HANDLE: %d",this->uuid_char_handle_);
-      // }
-
-      // auto *serial_char_ = this->parent_->get_characteristic(POWERPAL_SERVICE_UUID,
-      // POWERPAL_CHARACTERISTIC_SERIAL_UUID); if (serial_char_ == nullptr) {
-      //   ESP_LOGE(TAG, "[%s] No Powerpal service or Measurement Characteristic found at device, not a POWERPAL..?",
-      //             this->parent_->address_str().c_str());
-      //   break;
-      // } else {
-      //   this->serial_number_char_handle_ = serial_char_->handle;
-      //   ESP_LOGE(TAG, "SERIAL HANDLE: %d",this->serial_number_char_handle_);
-      // }
 
       break;
     }
@@ -276,7 +305,10 @@ void Powerpal::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gat
         ESP_LOGI(TAG, "Recieved uuid read event");
         this->powerpal_device_id_ = this->uuid_to_device_id_(param->read.value, param->read.value_len);
         ESP_LOGI(TAG, "Powerpal device id: %s", this->powerpal_device_id_.c_str());
-
+#ifdef USE_HTTP_REQUEST
+        this->powerpal_api_root_.append(this->powerpal_device_id_);
+        this->cloud_uploader_->set_url(this->powerpal_api_root_);
+#endif
         break;
       }
 
@@ -285,7 +317,22 @@ void Powerpal::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gat
         ESP_LOGI(TAG, "Recieved serial_number read event");
         this->powerpal_apikey_ = this->serial_to_apikey_(param->read.value, param->read.value_len);
         ESP_LOGI(TAG, "Powerpal apikey: %s", this->powerpal_apikey_.c_str());
-
+#ifdef USE_HTTP_REQUEST
+        http_request::Header acceptheader;
+        acceptheader.name = "Accept";
+        acceptheader.value = "application/json";
+        http_request::Header contentheader;
+        contentheader.name = "Content-Type";
+        contentheader.value = "application/json";
+        http_request::Header authheader;
+        authheader.name = "Authorization";
+        authheader.value = this->powerpal_apikey_.c_str();
+        std::list<http_request::Header> headers;
+        headers.push_back(acceptheader);
+        headers.push_back(contentheader);
+        headers.push_back(authheader);
+        this->cloud_uploader_->set_headers(headers);
+#endif
         break;
       }
 
@@ -317,7 +364,7 @@ void Powerpal::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gat
             ESP_LOGW(TAG, "Error sending read request for powerpal uuid, status=%d", read_uuid_status);
           }
         }
-        if (!this->powerpal_device_id_.length()) {
+         if (!this->powerpal_device_id_.length()) {
           // read serial number (device id)
           auto read_serial_number_status = esp_ble_gattc_read_char(this->parent()->get_gattc_if(), this->parent()->get_conn_id(),
                                                             this->serial_number_char_handle_, ESP_GATT_AUTH_REQ_NONE);
@@ -342,7 +389,7 @@ void Powerpal::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gat
           }
         }
 
-        // read firmware version
+         // read firmware version
         auto read_firmware_status =
             esp_ble_gattc_read_char(this->parent()->get_gattc_if(), this->parent()->get_conn_id(),
                                     this->firmware_char_handle_, ESP_GATT_AUTH_REQ_NONE);
@@ -405,7 +452,8 @@ void Powerpal::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_pa
     case ESP_GAP_BLE_AUTH_CMPL_EVT: {
       if (param->ble_security.auth_cmpl.success) {
         ESP_LOGI(TAG, "[%s] Writing pairing code to Powerpal", this->parent_->address_str().c_str());
-        auto status = esp_ble_gattc_write_char(this->parent()->get_gattc_if(), this->parent()->get_conn_id(),
+        auto status = esp_ble_gattc_write_char(this->parent()->get_gattc_if(),
+                                              this->parent()->get_conn_id(),
                                                this->pairing_code_char_handle_, sizeof(this->pairing_code_),
                                                this->pairing_code_, ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
         if (status) {
@@ -418,7 +466,6 @@ void Powerpal::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_pa
       break;
   }
 }
-
 }  // namespace powerpal_ble
 }  // namespace esphome
 
