@@ -70,7 +70,7 @@ class Powerpal : public esphome::ble_client::BLEClientNode, public Component {
   void set_daily_energy_sensor(sensor::Sensor *daily_energy_sensor) { daily_energy_sensor_ = daily_energy_sensor; }
   void set_cost_sensor(sensor::Sensor *cost_sensor) { cost_sensor_ = cost_sensor;}
   void set_pulses_sensor(sensor::Sensor *pulses_sensor) { pulses_sensor_ = pulses_sensor;}
-  void set_watt_hours(sensor::Sensor *watt_hours_sensor) {watt_hours_sensor_ = watt_hours_sensor;}
+    void set_watt_hours(sensor::Sensor *watt_hours_sensor) {watt_hours_sensor_ = watt_hours_sensor;}
   void set_timestamp(sensor::Sensor *timestamp_sensor) { timestamp_sensor_ = timestamp_sensor;}
   void set_daily_pulses_sensor(sensor::Sensor *daily_pulses_sensor) { daily_pulses_sensor_ = daily_pulses_sensor;}
 #ifdef USE_TIME
@@ -107,10 +107,10 @@ class Powerpal : public esphome::ble_client::BLEClientNode, public Component {
   sensor::Sensor *daily_energy_sensor_{nullptr};
   sensor::Sensor *cost_sensor_{nullptr};
   sensor::Sensor *pulses_sensor_{nullptr};
-  sensor::Sensor *daily_pulses_sensor_{nullptr};
-  sensor::Sensor *watt_hours_sensor_{nullptr};
+    sensor::Sensor *daily_pulses_sensor_{nullptr};
+    sensor::Sensor *watt_hours_sensor_{nullptr};
   sensor::Sensor *timestamp_sensor_{nullptr};
- 
+
 
 #ifdef USE_TIME
   optional<time::RealTimeClock *> time_{};
